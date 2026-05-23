@@ -22,8 +22,10 @@ func bench(_ name: String, iterations: Int = 20, _ block: () throws -> Void) ret
 }
 
 try bench("SwiftJSON") {
-    var parser = JSONParser(json)
-    _ = try parser.parse()
+    for _ in 0..<5000 {
+        var parser = JSONParser(json)
+        _ = try parser.parse()
+    }
 }
 
 try bench("JSONSerialization") {
