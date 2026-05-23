@@ -14,49 +14,60 @@ enum JSONError: Error {
 }
 
 public struct JSONParser {
-    private let source: String
-    private var index: String.Index
+    private let source: [UInt8]
+    private var index: Int
 
     public init(_ source: String) {
-        self.source = source
-        self.index = source.startIndex
+        self.source = Array(source.utf8)
+        self.index = 0
     }
 
     public mutating func parse() throws -> JSONValue {
-        return try parseValue()
+        let value = try parseValue()
+        skipWhitespaceIfNeeded()
+        if index != source.count {
+            throw JSONError.unexpectedCharacter(Character(UnicodeScalar(source[index])))
+        }
+        return value
     }
 
     private mutating func parseValue() throws -> JSONValue {
         skipWhitespaceIfNeeded()
-        switch source[index] {
-        case "n" : return try parseNull()
-        case "t", "f" : return try parseBool()
-        case "-", "0"..."9":  return try parseNumber()
-        case "\"": return try parseString()
-        case "[": return try parseArray()
-        case "{": return try parseObject()
-        default: throw JSONError.unexpectedCharacter(source[index])
+        let c = try peek()
+        switch c {
+        case UInt8(ascii: "n") : return try parseNull()
+        case UInt8(ascii: "t"), UInt8(ascii: "f") : return try parseBool()
+        case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"):  return try parseNumber()
+        case UInt8(ascii: "\""): return try parseString()
+        case UInt8(ascii: "["): return try parseArray()
+        case UInt8(ascii: "{"): return try parseObject()
+        default: throw JSONError.unexpectedCharacter(Character(UnicodeScalar(source[index])))
         }
     }
 
     private mutating func parseNull() throws -> JSONValue {
-        return try parseLiteral("null")
+        try expect(Array("null".utf8))
+        return .null
     }
 
     private mutating func parseBool() throws -> JSONValue {
-        if source[index] == "t" { return try parseLiteral("true") }
-        return try parseLiteral("false")
+        if try peek() == UInt8(ascii: "t") { 
+            try expect(Array("true".utf8))
+            return .bool(true)
+        }
+        try expect(Array("false".utf8))
+        return .bool(false)
     }
 
     private mutating func parseNumber() throws -> JSONValue {
         let startIndex = index
-        if (try? peek()) == "-" { advance() }
-        while index < source.endIndex, try "0"..."9" ~= peek() { advance() }
-        if index < source.endIndex, (try? peek()) == "." {
+        if (try? peek()) == UInt8(ascii: "-") { advance() }
+        while index < source.count, try UInt8(ascii: "0")...UInt8(ascii: "9") ~= peek() { advance() }
+        if index < source.count, (try? peek()) == UInt8(ascii: ".") {
             advance()
-            while index < source.endIndex, try "0"..."9" ~= peek() { advance() }
+            while index < source.count, try UInt8(ascii: "0")...UInt8(ascii: "9") ~= peek() { advance() }
         }
-        let substring = String(source[startIndex..<index])
+        let substring = String(decoding: source[startIndex..<index], as: UTF8.self)
         guard let value = Double(substring) else {
             throw JSONError.invalidNumber(substring)
         }
@@ -69,84 +80,86 @@ public struct JSONParser {
     }
 
     private mutating func parseArray() throws -> JSONValue {
-        try consume("[")
+        try consume(UInt8(ascii: "["))
         skipWhitespaceIfNeeded()
         var array: [JSONValue] = []
-        while try peek() != "]" {
+        while try peek() != UInt8(ascii: "]") {
             let value = try parseValue()
             array.append(value)
             skipWhitespaceIfNeeded()
-            if (try? peek()) == "," {
+            if (try? peek()) == UInt8(ascii: ",") {
                 advance()
                 skipWhitespaceIfNeeded()
             }
         }
-        try consume("]")
+        try consume(UInt8(ascii: "]"))
         return .array(array)
     }
 
     private mutating func parseObject() throws -> JSONValue {
-        try consume("{")
+        try consume(UInt8(ascii: "{"))
         var dict: [String: JSONValue] = [:]
-        while try peek() != "}" {
+        while try peek() != UInt8(ascii: "}") {
             skipWhitespaceIfNeeded()
             let key = try getString()
             skipWhitespaceIfNeeded()
-            try consume(":")
+            try consume(UInt8(ascii: ":"))
             let value = try parseValue()
             dict[key] = value
             skipWhitespaceIfNeeded()
-            if (try? peek()) == "," {
+            if (try? peek()) == UInt8(ascii: ",") {
                 advance()
                 skipWhitespaceIfNeeded()
             }
         }
-        try consume("}")
+        try consume(UInt8(ascii: "}"))
         return .object(dict)
     }
 
     private mutating func skipWhitespaceIfNeeded() {
-        while index != source.endIndex, 
-        source[index].isWhitespace || source[index].isNewline { index = source.index(after: index) }
+        while index < source.count {
+            let c = source[index]
+            if c == UInt8(ascii: " ") || c == UInt8(ascii: "\t") || c == UInt8(ascii: "\n") || c == UInt8(ascii: "\r") {
+                index += 1
+            } else {
+                break
+            }
+        }
     }
 
     // MARK: Helper
-    private mutating func parseLiteral(_ expectedString: String) throws -> JSONValue {
-        guard let endIndex = source.index(index, offsetBy: expectedString.count, limitedBy: source.endIndex) else {
+    private mutating func expect(_ literal: [UInt8]) throws {
+        guard index + literal.count <= source.count else {
             throw JSONError.unexpectedEnd
         }
-        if source[index..<endIndex] == expectedString {
-            index = endIndex
-            switch expectedString {
-                case "null": return .null
-                case "true": return .bool(true)
-                case "false": return .bool(false)
-                default: throw JSONError.unexpectedCharacter(source[index])
+        for i in 0..<literal.count{
+            if source[index + i] != literal[i] {
+                throw JSONError.unexpectedCharacter(Character(UnicodeScalar(source[index + i])))
             }
         }
-        throw JSONError.unexpectedCharacter(source[index])
+        index += literal.count
     }
 
     private mutating func getString() throws -> String {
-        try consume("\"")
+        try consume(UInt8(ascii: "\""))
         let startIndex = index
-        while try peek() != "\"" { advance() }
-        let value = String(source[startIndex..<index])
-        try consume("\"")
+        while try peek() != UInt8(ascii: "\"") { advance() }
+        let value = String(decoding: source[startIndex..<index], as: UTF8.self)
+        try consume(UInt8(ascii: "\""))
         return value
     }
 
     private mutating func advance() {
-        index = source.index(after: index)
+        index += 1
     }
 
-    private func peek() throws -> Character {
-        guard index < source.endIndex else { throw JSONError.unexpectedEnd }
+    private func peek() throws -> UInt8 {
+        guard index < source.count else { throw JSONError.unexpectedEnd }
         return source[index]
     }
 
-    private mutating func consume(_ expected: Character) throws {
-        guard try peek() == expected else { throw JSONError.unexpectedCharacter(source[index]) }
+    private mutating func consume(_ expected: UInt8) throws {
+        guard try peek() == expected else { throw JSONError.unexpectedCharacter(Character(UnicodeScalar(source[index]))) }
         advance()
     }
 }
